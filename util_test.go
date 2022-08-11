@@ -70,7 +70,8 @@ func TestGenerateUUID(t *testing.T) {
 	prev := generateUUID()
 	pattern, err := regexp.Compile(`[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}`)
 	if err != nil {
-		panic("regexp Compile err: " + err.Error())
+		// panic("regexp Compile err: " + err.Error())
+		t.Fatalf("regexp Compile err: %v", err)
 	}
 	for i := 0; i < 100; i++ {
 		id := generateUUID()
