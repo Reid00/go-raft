@@ -1,159 +1,96 @@
 package raft
 
 import (
-	"regexp"
+	"math"
+	"reflect"
+	"strings"
 	"testing"
-	"time"
+
+	pb "github.com/Reid00/go-raft/raftpb"
 )
 
-func TestRandomTiemout(t *testing.T) {
-	start := time.Now()
-	timeout := randomTimeout(time.Millisecond)
+var testFormatter EntryFormatter = func(b []byte) string {
+	return strings.ToUpper(string(b))
+}
 
-	select {
-	case <-timeout:
-		// diff := time.Now().Sub(start)
-		// FIXED above is not recommanded
-		diff := time.Since(start)
-		if diff < time.Millisecond {
-			t.Fatalf("fired early")
+func TestDescribeEntry(t *testing.T) {
+	entry := pb.Entry{
+		Term:  1,
+		Index: 2,
+		Type:  pb.EntryNormal,
+		Data:  []byte("hello\x00world"),
+	}
+
+	defaultFormatted := DescribeEntry(entry, nil)
+	if defaultFormatted != "1/2 EntryNormal \"hello\\x00world\"" {
+		t.Errorf("unexpected default output: %s", defaultFormatted)
+	}
+
+	customFormatted := DescribeEntry(entry, testFormatter)
+	if customFormatted != "1/2 EntryNormal HELLO\x00WORLD" {
+		t.Errorf("unexpected custom ouput: %s", customFormatted)
+	}
+}
+
+func TestLimitSize(t *testing.T) {
+	ents := []pb.Entry{
+		{Index: 4, Term: 4},
+		{Index: 5, Term: 5},
+		{Index: 6, Term: 6},
+	}
+
+	tests := []struct {
+		maxsize uint64
+		wenties []pb.Entry
+	}{
+		{math.MaxUint64, []pb.Entry{{Index: 4, Term: 4}, {Index: 5, Term: 5}, {Index: 6, Term: 6}}},
+		// even if maxsize is zero, the first entry should be returned
+		{0, []pb.Entry{{Index: 4, Term: 4}}},
+		// limit to 2
+		{uint64(ents[0].Size() + ents[1].Size()), []pb.Entry{{Index: 4, Term: 4}, {Index: 5, Term: 5}}},
+		// limit to 2
+		{uint64(ents[0].Size() + ents[1].Size() + ents[2].Size()/2), []pb.Entry{{Index: 4, Term: 4}, {Index: 5, Term: 5}}},
+		{uint64(ents[0].Size() + ents[1].Size() + ents[2].Size() - 1), []pb.Entry{{Index: 4, Term: 4}, {Index: 5, Term: 5}}},
+		// all
+		{uint64(ents[0].Size() + ents[1].Size() + ents[2].Size()), []pb.Entry{{Index: 4, Term: 4}, {Index: 5, Term: 5}, {Index: 6, Term: 6}}},
+	}
+
+	for i, tt := range tests {
+		if !reflect.DeepEqual(limitSize(ents, tt.maxsize), tt.wenties) {
+			t.Errorf("#%d: entries=%v, want %v", i, limitSize(ents, tt.maxsize), tt.wenties)
 		}
-	case <-time.After(3 * time.Millisecond):
-		t.Fatalf("timeout")
 	}
 }
 
-func TestNewSeed(t *testing.T) {
-	vals := make(map[int64]bool)
-
-	for i := 0; i < 10000; i++ {
-		seed := newSeed()
-		if _, exists := vals[seed]; exists {
-			t.Fatalf("newSeed() return a value it'd previously returned")
+func TestIsLocalMsg(t *testing.T) {
+	tests := []struct {
+		msgt    pb.MessageType
+		isLocal bool
+	}{
+		{pb.MsgHup, true},
+		{pb.MsgBeat, true},
+		{pb.MsgUnreachable, true},
+		{pb.MsgSnapStatus, true},
+		{pb.MsgCheckQuorum, true},
+		{pb.MsgTransferLeader, false},
+		{pb.MsgProp, false},
+		{pb.MsgApp, false},
+		{pb.MsgAppResp, false},
+		{pb.MsgVote, false},
+		{pb.MsgVoteResp, false},
+		{pb.MsgSnap, false},
+		{pb.MsgHeartbeat, false},
+		{pb.MsgHeartbeatResp, false},
+		{pb.MsgTimeoutNow, false},
+		{pb.MsgReadIndex, false},
+		{pb.MsgReadIndexResp, false},
+		{pb.MsgPreVote, false},
+		{pb.MsgPreVoteResp, false},
+	}
+	for i, tt := range tests {
+		got := IsLocalMsg(tt.msgt)
+		if got != tt.isLocal {
+			t.Errorf("#%d: got %v, watn %v", i, got, tt.isLocal)
 		}
-		vals[seed] = true
 	}
-}
-
-func TestRandomTimeout_NoTime(t *testing.T) {
-	timeout := randomTimeout(0)
-	if timeout != nil {
-		t.Fatalf("expected nil channel")
-	}
-}
-
-func TestMin(t *testing.T) {
-	if min(1, 1) != 1 {
-		t.Fatalf("bad min")
-	}
-	if min(2, 1) != 1 {
-		t.Fatal("bad min")
-	}
-	if min(1, 2) != 1 {
-		t.Fatalf("bad min")
-	}
-}
-
-func TestMax(t *testing.T) {
-	if max(1, 1) != 1 {
-		t.Fatalf("bad max")
-	}
-	if max(2, 1) != 2 {
-		t.Fatal("bad max")
-	}
-	if max(1, 2) != 2 {
-		t.Fatalf("bad max")
-	}
-}
-
-func TestGenerateUUID(t *testing.T) {
-	prev := generateUUID()
-	pattern, err := regexp.Compile(`[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}`)
-	if err != nil {
-		// panic("regexp Compile err: " + err.Error())
-		t.Fatalf("regexp Compile err: %v", err)
-	}
-	for i := 0; i < 100; i++ {
-		id := generateUUID()
-		if prev == id {
-			t.Fatalf("should get a new ID!")
-		}
-		matched := pattern.MatchString(id)
-		if !matched {
-			t.Fatalf("expected match %s, %v, %v", id, matched, err)
-		}
-		// FIXED below has poor performace
-		// matched, err := regexp.MatchString(
-		// 	`[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}`, id)
-		// if !matched || err != nil {
-		// 	t.Fatalf("expected match %s, %v, %v", id, matched, err)
-		// }
-	}
-}
-func TestBackoff(t *testing.T) {
-	b := backoff(10*time.Millisecond, 1, 8)
-	if b != 10*time.Millisecond {
-		t.Fatalf("bad: %v", b)
-	}
-
-	b = backoff(20*time.Millisecond, 2, 8)
-	if b != 20*time.Millisecond {
-		t.Fatalf("bad: %v", b)
-	}
-
-	b = backoff(10*time.Millisecond, 8, 8)
-	if b != 640*time.Millisecond {
-		t.Fatalf("bad: %v", b)
-	}
-
-	b = backoff(10*time.Millisecond, 9, 8)
-	if b != 640*time.Millisecond {
-		t.Fatalf("bad: %v", b)
-	}
-}
-
-func TestOverrideNotifyBool(t *testing.T) {
-	ch := make(chan bool, 1)
-
-	// sanity check - buffered channel don't have any values
-	select {
-	case v := <-ch:
-		t.Fatalf("unexpected receive: %v", v)
-	default:
-	}
-
-	// simple case of single push
-	overrideNotifyBool(ch, false)
-	select {
-	case v := <-ch:
-		if v != false {
-			t.Fatalf("expected false but got %v", v)
-		}
-	default:
-		t.Fatalf("expected a value but is not ready")
-	}
-
-	// assert that function never blocks and only last item is received
-	overrideNotifyBool(ch, false)
-	overrideNotifyBool(ch, false)
-	overrideNotifyBool(ch, false)
-	overrideNotifyBool(ch, false)
-	overrideNotifyBool(ch, true)
-
-	select {
-	case v := <-ch:
-		if v != true {
-			t.Fatalf("expected true but got %v", v)
-		}
-	default:
-		t.Fatalf("expected a value but is not ready")
-	}
-
-	// no further value is available
-	select {
-	case v := <-ch:
-		t.Fatalf("unexpected receive: %v", v)
-	default:
-	}
-
 }

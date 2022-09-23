@@ -2,165 +2,13 @@ package raft
 
 import (
 	"bytes"
-	crand "crypto/rand"
 	"fmt"
-	"math"
-	"math/big"
-	"math/rand"
-	"time"
 
-	"github.com/hashicorp/go-msgpack/codec"
+	pb "github.com/Reid00/go-raft/raftpb"
 )
 
-func init() {
-	// Ensure we use a high-entropy seed for the pseudo-random generator
-	rand.Seed(newSeed())
-}
-
-// returns an int64 from a crypto random source
-// can be used to seed a source for a math/rand.
-func newSeed() int64 {
-	r, err := crand.Int(crand.Reader, big.NewInt(math.MaxInt64))
-	if err != nil {
-		panic(fmt.Errorf("failed to read random bytes: %v", err))
-	}
-	return r.Int64()
-}
-
-// randomTimeout returns a value that is between the minVal and 2x minVal.
-func randomTimeout(minVal time.Duration) <-chan time.Time {
-	if minVal == 0 {
-		return nil
-	}
-
-	extra := time.Duration(rand.Int63()) % minVal
-	return time.After(minVal + extra)
-}
-
-// min returns the minimum.
-func min(a, b uint64) uint64 {
-	if a <= b {
-		return a
-	}
-	return b
-}
-
-// max returns the maximum.
-func max(a, b uint64) uint64 {
-	if a >= b {
-		return a
-	}
-	return b
-}
-
-// generateUUID is used to generate a random UUID.
-func generateUUID() string {
-	buf := make([]byte, 16)
-	if _, err := crand.Read(buf); err != nil {
-		panic(fmt.Errorf("failed to read random bytes: %v", err))
-	}
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%12x",
-		buf[0:4],
-		buf[4:6],
-		buf[6:8],
-		buf[8:10],
-		buf[10:16],
-	)
-}
-
-// asyncNotifyCh is used to do an async channel send
-// to a single channel without blocking.
-func asyncNotifyCh(ch chan struct{}) {
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
-}
-
-// drainNotifyCh empties out a single-item notification channel without
-// blocking, and returns whether it received anything.
-func drainNotifyCh(ch chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
-	}
-}
-
-// asyncNotifyBool is used to do an async notification
-// on a bool channel.
-func asyncNotifyBool(ch chan bool, v bool) {
-	select {
-	case ch <- v:
-	default:
-	}
-}
-
-// overrideNotifyBool is used to notify on a bool channel
-// but override existing value if value is present.
-// ch must be 1-item buffered channel.
-//
-// This method does not support multiple concurrent calls.
-func overrideNotifyBool(ch chan bool, v bool) {
-	select {
-	case ch <- v:
-		// value sent, all done
-	case <-ch:
-		// channel had on old value
-		select {
-		case ch <- v:
-		default:
-			panic("race: channel was sent concurrently")
-		}
-	}
-}
-
-// Decode reverses the encode operation on a byte slice input.
-func decodeMsgPack(buf []byte, out any) error {
-	r := bytes.NewBuffer(buf)
-	hd := codec.MsgpackHandle{}
-	dec := codec.NewDecoder(r, &hd)
-	return dec.Decode(out)
-}
-
-// Encode writes an encoded object to a new bytes buffer.
-func encodeMsgPack(in any) (*bytes.Buffer, error) {
-	buf := bytes.NewBuffer(nil)
-	hd := codec.MsgpackHandle{}
-	enc := codec.NewEncoder(buf, &hd)
-	err := enc.Encode(in)
-	return buf, err
-}
-
-// backoff is used to computer an exponential backoff duration.
-// Base time is scaled by the current round,
-// up to some maximum scale factor.
-func backoff(base time.Duration, round, limit uint64) time.Duration {
-	power := min(round, limit)
-	for power > 2 {
-		base *= 2
-		power--
-	}
-	return base
-}
-
-// cappedExponentialBackoff computes the exponential backoff with an adjustable
-// cap on the max timeout.
-func cappedExponentialBackoff(base time.Duration, round, limit uint64, cap time.Duration) time.Duration {
-	power := min(round, limit)
-	for power > 2 {
-		if base > cap {
-			return cap
-		}
-		base *= 2
-		power--
-	}
-
-	if base > cap {
-		return cap
-	}
-	return base
+func (st StateType) MarshalJson() ([]byte, error) {
+	return []byte(fmt.Sprintf("%q", st.String())), nil
 }
 
 // Needed for sorting []uint64, used to determine commitment
@@ -169,3 +17,102 @@ type uint64Slice []uint64
 func (p uint64Slice) Len() int           { return len(p) }
 func (p uint64Slice) Less(i, j int) bool { return p[i] < p[j] }
 func (p uint64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+func min(a, b uint64) uint64 {
+	if a > b {
+		return b
+	}
+	return a
+}
+
+func max(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func IsLocalMsg(msgt pb.MessageType) bool {
+	return msgt == pb.MsgHup || msgt == pb.MsgBeat || msgt == pb.MsgUnreachable ||
+		msgt == pb.MsgSnapStatus || msgt == pb.MsgCheckQuorum
+}
+
+func IsResponseMsg(msgt pb.MessageType) bool {
+	return msgt == pb.MsgAppResp || msgt == pb.MsgVoteResp || msgt == pb.MsgHeartbeatResp ||
+		msgt == pb.MsgUnreachable || msgt == pb.MsgPreVoteResp
+}
+
+func voteRespMsgType(msgt pb.MessageType) pb.MessageType {
+	switch msgt {
+	case pb.MsgVote:
+		return pb.MsgVoteResp
+	case pb.MsgPreVote:
+		return pb.MsgPreVote
+	default:
+		panic(fmt.Sprintf("not a vote message: %s", msgt))
+	}
+}
+
+// EntryFormatter can be implemented by the application to provide human-readable formatting
+// of entry data. Nil is a valid EntryFormatter and will use a default format.
+type EntryFormatter func([]byte) string
+
+// DescribeMessage returns a concise human-readable description of a
+// Message for debugging.
+func DescribeMessage(m pb.Message, f EntryFormatter) string {
+	var buf bytes.Buffer
+
+	fmt.Fprintf(&buf, "%x -> %x %v Term: %d Log: %d/%d", m.From, m.To, m.Type, m.Term, m.LogTerm, m.Index)
+	if m.Reject {
+		fmt.Fprintf(&buf, " Reject")
+		if m.RejectHint != 0 {
+			fmt.Fprintf(&buf, "(Hint: %d)", m.RejectHint)
+		}
+	}
+	if m.Commit != 0 {
+		fmt.Fprintf(&buf, " Commit: %d", m.Commit)
+	}
+
+	if len(m.Entries) > 0 {
+		fmt.Fprintf(&buf, " Entries:[")
+		for i, e := range m.Entries {
+			if i != 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(DescribeEntry(e, f))
+		}
+		fmt.Fprintf(&buf, "]")
+	}
+	if !IsEmptySnap(m.Snapshot) {
+		fmt.Fprintf(&buf, " Snapshot: %v", m.Snapshot)
+	}
+	return buf.String()
+}
+
+// DescribeEntry returns a concise human-readable description of an
+// Entry for debugging.
+func DescribeEntry(e pb.Entry, f EntryFormatter) string {
+	var formatted string
+	if e.Type == pb.EntryNormal && f != nil {
+		formatted = f(e.Data)
+	} else {
+		formatted = fmt.Sprintf("%q", e.Data)
+	}
+	return fmt.Sprintf("%d/%d %s %s", e.Term, e.Index, e.Type, formatted)
+}
+
+func limitSize(ents []pb.Entry, maxSize uint64) []pb.Entry {
+	if len(ents) == 0 {
+		return ents
+	}
+	size := ents[0].Size()
+	var limit int
+
+	for limit = 1; limit < len(ents); limit++ {
+		size += ents[limit].Size()
+		if uint64(size) > maxSize {
+			break
+		}
+	}
+	return ents[:limit]
+}
