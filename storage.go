@@ -94,6 +94,7 @@ func (ms *MemoryStorage) SetHardState(st pb.HardState) error {
 	return nil
 }
 
+// Entries implements the Storage interface.
 func (ms *MemoryStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	ms.Lock()
 	defer ms.Unlock()
@@ -105,7 +106,7 @@ func (ms *MemoryStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	}
 
 	if hi > ms.lastIndex()+1 {
-		// TODO convert to raftlog
+		// TODO use raftlog instead of Go std log package
 		log.Panicf("entries' hi (%d) is out of bound lastindex(%d)", hi, ms.lastIndex())
 	}
 	// only contains dummpy entries
@@ -116,6 +117,21 @@ func (ms *MemoryStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	return limitSize(ents, maxSize), nil
 }
 
+// Term implements the Storage interface
+func (ms *MemoryStorage) Term(i uint64) (uint64, error) {
+	ms.Lock()
+	defer ms.Unlock()
+	offset := ms.ents[0].Index
+	if i < offset {
+		return 0, ErrCompacted
+	}
+	if int(i-offset) >= len(ms.ents) {
+		return 0, ErrUnavailable
+	}
+	return ms.ents[i-offset].Term, nil
+}
+
+// LastIndex implements the Storage interface.
 func (ms *MemoryStorage) LastIndex() (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
@@ -126,6 +142,7 @@ func (ms *MemoryStorage) lastIndex() uint64 {
 	return ms.ents[0].Index + uint64(len(ms.ents)) - 1
 }
 
+// FirstIndex implements the Storage interface.
 func (ms *MemoryStorage) FirstIndex() (uint64, error) {
 	ms.Lock()
 	defer ms.Unlock()
@@ -136,3 +153,55 @@ func (ms *MemoryStorage) firstIndex() uint64 {
 	return ms.ents[0].Index + 1
 }
 
+// Snapshot implements to Storage interface.
+func (ms *MemoryStorage) Snapshot() (pb.Snapshot, error) {
+	ms.Lock()
+	defer ms.Unlock()
+
+	return ms.snapshot, nil
+}
+
+func (ms *MemoryStorage) ApplySnapshot(snap pb.Snapshot) error {
+	ms.Lock()
+	defer ms.Unlock()
+
+	// handle check for old snapshot being applied
+	msIndex := ms.snapshot.Metadata.Index
+	snapIndex := snap.Metadata.Index
+	if msIndex >= snapIndex {
+		return ErrSnapOutOfDate
+	}
+
+	ms.snapshot = snap
+	ms.ents = []pb.Entry{{Term: snap.Metadata.Term, Index: snap.Metadata.Index}}
+	return nil
+}
+
+// CreateSnapshot makes a snapshot which can be retrieved with Snapshot() and
+// can be used to reconstruct the state at that point.
+// If any configuration changes have been made since the last compaction,
+// the result of the last ApplyConfChange must be passed in.
+func (ms *MemoryStorage) CreateSnapshot(i uint64, cs *pb.ConfState, data []byte) (pb.Snapshot, error) {
+	ms.Lock()
+	defer ms.Unlock()
+
+	if i < ms.snapshot.Metadata.Index {
+		return pb.Snapshot{}, ErrSnapOutOfDate
+	}
+
+	offset := ms.ents[0].Index
+	if i > ms.lastIndex() {
+		// TODO
+		log.Panicf("snapshot %d is out of bound lastindex(%d)", i, ms.lastIndex())
+	}
+
+	ms.snapshot.Metadata.Index = i
+	ms.snapshot.Metadata.Term = ms.ents[i-offset].Term
+	if cs != nil {
+		ms.snapshot.Metadata.ConfState = *cs
+	}
+
+	ms.snapshot.Data = data
+	return ms.snapshot, nil
+
+}
