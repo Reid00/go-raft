@@ -101,6 +101,7 @@ func DescribeEntry(e pb.Entry, f EntryFormatter) string {
 	return fmt.Sprintf("%d/%d %s %s", e.Term, e.Index, e.Type, formatted)
 }
 
+// limitSize 限制的是最大的字节数maxSize 下面有多少个entry
 func limitSize(ents []pb.Entry, maxSize uint64) []pb.Entry {
 	if len(ents) == 0 {
 		return ents

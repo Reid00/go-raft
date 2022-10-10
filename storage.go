@@ -205,3 +205,68 @@ func (ms *MemoryStorage) CreateSnapshot(i uint64, cs *pb.ConfState, data []byte)
 	return ms.snapshot, nil
 
 }
+
+// Compact discards all log entries prior to compactIndex.
+// It is the application's responsibility to not attempt to compact an index
+// greater than raftLog.applied.
+func (ms *MemoryStorage) Compact(compactIndex uint64) error {
+	ms.Lock()
+	defer ms.Unlock()
+
+	offset := ms.ents[0].Index
+
+	if compactIndex <= offset {
+		return ErrCompacted
+	}
+
+	if compactIndex > ms.lastIndex() {
+		// TODO log chang
+		log.Panicf("compact %d is out of bound last index(%d)", compactIndex, ms.lastIndex())
+	}
+
+	i := compactIndex - offset
+	ents := make([]pb.Entry, 1, 1+uint64(len(ms.ents))-i)
+
+	ents[0].Index = ms.ents[i].Index
+	ents[0].Term = ms.ents[i].Term
+	ents = append(ents, ms.ents[i+1:]...)
+	ms.ents = ents
+	return nil
+}
+
+// Append the new entries to storage.
+func (ms *MemoryStorage) Append(entries []pb.Entry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	ms.Lock()
+	defer ms.Unlock()
+
+	first := ms.firstIndex()
+	// 要加入entry 的最后一个entry 的index
+	last := entries[0].Index + uint64(len(entries)) - 1
+
+	// shortcut if there is no new entry
+	if last < first {
+		return nil
+	}
+
+	// truncate compacted entries
+	// TODO entries 里面的index 也是连续的
+	if first > entries[0].Index {
+		entries = entries[first-entries[0].Index:]
+	}
+
+	offset := entries[0].Index - ms.ents[0].Index // NOTE offset 是新的ms.entries 和 entries 重合的部分，以ms.entries 为准
+	switch {
+	case uint64(len(ms.ents)) > offset:
+		ms.ents = append([]pb.Entry{}, ms.ents[:offset]...)
+		ms.ents = append(ms.ents, entries...)
+	case uint64(len(ms.ents)) == offset:
+		ms.ents = append(ms.ents, entries...)
+	default:
+		log.Panicf("missing log entry [last: %d, append at: %d]", ms.lastIndex(), entries[0].Index)
+	}
+	return nil
+}
