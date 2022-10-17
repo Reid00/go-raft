@@ -65,8 +65,12 @@ type MemoryStorage struct {
 	// goroutine.
 	sync.Mutex
 
+	// hardState 节点的状态：包括当前的任期term、当前的投票目标vote、
+	// 可提交的最大日志索引commit三个字段。
+	// 前两个字段是leader选举流程中的承诺，第三个字段是节点在重启恢复时用来控制日志回放到哪一条日志。
 	hardState pb.HardState
-	snapshot  pb.Snapshot
+
+	snapshot pb.Snapshot
 
 	// ents[i] has raft log position i+snapshot.Metadata.Index
 	ents []pb.Entry

@@ -1,6 +1,8 @@
 package raft
 
-import pb "github.com/Reid00/go-raft/raftpb"
+import (
+	pb "github.com/Reid00/go-raft/raftpb"
+)
 
 // unstable.entries[i] has raft log position i+unstable.offset.
 // Note that unstable.offset may be less than the highest log
@@ -11,6 +13,7 @@ type unstable struct {
 	snapshot *pb.Snapshot
 
 	// all entries that have not yet been written to storage.
+	// entries 和 snapshot 两个只存在一个
 	entries []pb.Entry
 	// entries 中的第一个元素的Index
 	offset uint64
@@ -20,6 +23,7 @@ type unstable struct {
 
 // maybeFirstIndex returns the index of the first possible entry in entries
 // if it has a snapshot.
+// 获取的是相对整个raftLog的first index, 当无法得知时，返回的第二个参数时false
 func (u *unstable) maybeFirstIndex() (uint64, bool) {
 	if u.snapshot != nil {
 		return u.snapshot.Metadata.Index + 1, true
@@ -65,6 +69,9 @@ func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
 }
 
 // stableTo stable to snapshot before i index and t term
+// stableTo 该函数传入一个索引号i和任期号t，表示应用层已经将这个索引之前的数据进行持久化了，
+// 此时unstable要做的事情就是在自己的数据中查询，只有在满足任期号相同以及i大于等于offset的情况下，
+// 可以将entries中的数据进行缩容，将i之前的数据删除。
 func (u *unstable) stableTo(i, t uint64) {
 	gt, ok := u.maybeTerm(i)
 	if !ok {
@@ -80,12 +87,16 @@ func (u *unstable) stableTo(i, t uint64) {
 	}
 }
 
+// stableSnapTo 该函数传入一个索引i，用于告诉unstable，索引i对应的快照数据已经被应用层持久化了，
+// 如果这个索引与当前快照数据对应的上，那么快照数据就可以被置空了。
 func (u *unstable) stableSnapTo(i uint64) {
 	if u.snapshot != nil && u.snapshot.Metadata.Index == i {
 		u.snapshot = nil
 	}
 }
 
+// restore 从快照数据中恢复，此时unstable将保存快照数据，
+// 同时将offset成员设置成这个快照数据索引的下一位。
 func (u *unstable) restore(s pb.Snapshot) {
 	u.offset = s.Metadata.Index + 1
 	u.entries = nil
